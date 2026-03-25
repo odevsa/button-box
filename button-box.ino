@@ -1,11 +1,19 @@
 #include <HID.h>
+#include <FastLED.h>
+
 
 // Uncomment to enable serial debug
 // #define DEBUG
 
 // Pin definitions (5x5 matrix)
-const int PIN_BUTTON_ARRAY_ROWS[] = {2, 3, 4, 5, 6};
-const int PIN_BUTTON_ARRAY_COLS[] = {7, 8, 9, 10, 14};
+const int PIN_BUTTON_ARRAY_ROWS[] = {2, 3}; // {2, 3, 4, 5, 6};
+const int PIN_BUTTON_ARRAY_COLS[] = {7, 8}; // {7, 8, 9, 10, 14};
+
+// LED strip config
+#define LED_PIN A0
+const int NUM_LEDS = sizeof(PIN_BUTTON_ARRAY_ROWS) / sizeof(PIN_BUTTON_ARRAY_ROWS[0]) * sizeof(PIN_BUTTON_ARRAY_COLS) / sizeof(PIN_BUTTON_ARRAY_COLS[0]);
+CRGB leds[NUM_LEDS];
+const CRGB ledColors[NUM_LEDS] = {CRGB::Red, CRGB::Green, CRGB::Blue, CRGB::Yellow};
 
 // Joystick Report ID
 #define JOYSTICK_REPORT_ID 0x03
@@ -72,6 +80,15 @@ void loadButtonArray()
   }
 }
 
+void updateLEDs()
+{
+  for (int i = 0; i < NUM_LEDS; i++) {
+    bool pressed = ((outputButtons >> i) & 0x1) != 0;
+    leds[i] = pressed ? CRGB::White : CRGB::Grey10;
+  }
+  FastLED.show();
+}
+
 void sendState()
 {
   joystickReport.buttons = outputButtons;
@@ -99,6 +116,10 @@ void setup()
   for (int i = 0; i < buttonArrayColSize; i++)
     pinMode(PIN_BUTTON_ARRAY_COLS[i], INPUT_PULLUP);
 
+  FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, NUM_LEDS);
+  for (int i = 0; i < NUM_LEDS; i++) leds[i] = CRGB::Black;
+  FastLED.show();
+
   static HIDSubDescriptor node(_hidReportDescriptor, sizeof(_hidReportDescriptor));
   HID().AppendDescriptor(&node);
 }
@@ -108,5 +129,6 @@ void loop()
   buttonCurrentIndex = 0;
   outputButtons = 0;
   loadButtonArray();
+  updateLEDs();
   sendState();
 }
