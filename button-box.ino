@@ -11,9 +11,53 @@ const int PIN_BUTTON_ARRAY_COLS[] = {7, 8}; // {7, 8, 9, 10, 14};
 
 // LED strip config
 #define LED_PIN A0
-const int NUM_LEDS = sizeof(PIN_BUTTON_ARRAY_ROWS) / sizeof(PIN_BUTTON_ARRAY_ROWS[0]) * sizeof(PIN_BUTTON_ARRAY_COLS) / sizeof(PIN_BUTTON_ARRAY_COLS[0]);
-CRGB leds[NUM_LEDS];
-const CRGB ledColors[NUM_LEDS] = {CRGB::Red, CRGB::Green, CRGB::Blue, CRGB::Yellow};
+
+typedef struct LedState
+{
+  CRGB idle;
+  CRGB pressed;
+} LedState;
+
+typedef struct ButtonPreference
+{
+  uint8_t colorIndex = 0;
+  bool isToggle = false;  
+} ButtonPreference;
+
+enum LedStateIndex
+{
+  WHITE = 0,
+  BLACK = 1,
+  RED = 2,
+  GREEN = 3,
+  BLUE = 4,
+  YELLOW = 5,
+  MAGENTA = 6,
+  CYAN = 7
+};
+
+const LedState LED_STATE_COLORS[] = {
+  { idle: {0, 0, 0}, pressed: {100, 100, 100} }, // black
+  { idle: {50, 50, 50}, pressed: {255, 255, 255} }, // white
+  { idle: {50, 0, 0}, pressed: {255, 0, 0} }, // red
+  { idle: {0, 50, 0}, pressed: {0, 255, 0} }, // green
+  { idle: {0, 0, 50}, pressed: {0, 0, 255} }, // blue
+  { idle: {50, 50, 0}, pressed: {255, 255, 0} }, // yellow
+  { idle: {50, 0, 50}, pressed: {255, 0, 255} }, // magenta
+  { idle: {0, 50, 50}, pressed: {0, 255, 255} }, // cyan
+};
+
+const uint8_t BUTTON_ROW_AMOUNT = sizeof(PIN_BUTTON_ARRAY_ROWS) / sizeof(PIN_BUTTON_ARRAY_ROWS[0]);
+const uint8_t BUTTON_COL_AMOUNT = sizeof(PIN_BUTTON_ARRAY_COLS) / sizeof(PIN_BUTTON_ARRAY_COLS[0]);
+const uint8_t BUTTON_AMOUNT = BUTTON_ROW_AMOUNT * BUTTON_COL_AMOUNT;
+const uint8_t LED_STATE_AMOUNT = sizeof(LED_STATE_COLORS) / sizeof(LED_STATE_COLORS[0]);
+CRGB leds[BUTTON_AMOUNT];
+
+
+ButtonPreference preferences[BUTTON_AMOUNT];
+bool currentToggleState[BUTTON_AMOUNT];
+bool previousPhysicalState[BUTTON_AMOUNT];
+uint32_t outputButtons = 0;
 
 // Joystick Report ID
 #define JOYSTICK_REPORT_ID 0x03
@@ -21,10 +65,8 @@ const CRGB ledColors[NUM_LEDS] = {CRGB::Red, CRGB::Green, CRGB::Blue, CRGB::Yell
 typedef struct JoystickReport
 {
   uint32_t buttons;
- } JoystickReport;
+} JoystickReport;
 
-int buttonArrayRowSize = sizeof(PIN_BUTTON_ARRAY_ROWS) / sizeof(PIN_BUTTON_ARRAY_ROWS[0]);
-int buttonArrayColSize = sizeof(PIN_BUTTON_ARRAY_COLS) / sizeof(PIN_BUTTON_ARRAY_COLS[0]);
 
 JoystickReport joystickReport = {0};
 
@@ -51,9 +93,6 @@ static const uint8_t _hidReportDescriptor[] PROGMEM = {
     0xc0 // END_COLLECTION
 };
 
-uint32_t outputButtons = 0;
-int buttonCurrentIndex = 0;
-
 void pressButton(uint8_t button)
 {
   bitSet(outputButtons, button);
@@ -69,12 +108,26 @@ void setButton(uint8_t button, bool pressed)
 
 void loadButtonArray()
 {
-  for (int row = 0; row < buttonArrayRowSize; row++)
+  uint8_t index = 0;
+  for (uint8_t row = 0; row < BUTTON_ROW_AMOUNT; row++)
   {
     digitalWrite(PIN_BUTTON_ARRAY_ROWS[row], LOW);
     
-    for (int col = 0; col < buttonArrayRowSize; col++)
-      setButton(buttonCurrentIndex++, digitalRead(PIN_BUTTON_ARRAY_COLS[col]) == LOW);
+    for (uint8_t col = 0; col < BUTTON_COL_AMOUNT; col++) {
+      bool physicalPressed = digitalRead(PIN_BUTTON_ARRAY_COLS[col]) == LOW;
+
+      if (preferences[index].isToggle) {
+        if (physicalPressed && !previousPhysicalState[index])
+          currentToggleState[index] = !currentToggleState[index];
+        
+        setButton(index, currentToggleState[index]);
+      } else {
+        setButton(index, physicalPressed);
+      }
+
+      previousPhysicalState[index] = physicalPressed;
+      index++;
+    }
     
     digitalWrite(PIN_BUTTON_ARRAY_ROWS[row], HIGH);
   }
@@ -82,9 +135,10 @@ void loadButtonArray()
 
 void updateLEDs()
 {
-  for (int i = 0; i < NUM_LEDS; i++) {
+  for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) {
+    const LedState color = LED_STATE_COLORS[preferences[i].colorIndex];
     bool pressed = ((outputButtons >> i) & 0x1) != 0;
-    leds[i] = pressed ? CRGB::White : CRGB::Grey10;
+    leds[i] = pressed ? color.pressed : color.idle;
   }
   FastLED.show();
 }
@@ -110,14 +164,14 @@ void setup()
   Serial.println("DEBUG: button array starting");
   #endif
 
-  for (int i = 0; i < buttonArrayRowSize; i++)
+  for (uint8_t i = 0; i < BUTTON_ROW_AMOUNT; i++)
     pinMode(PIN_BUTTON_ARRAY_ROWS[i], OUTPUT),
     digitalWrite(PIN_BUTTON_ARRAY_ROWS[i], HIGH);
-  for (int i = 0; i < buttonArrayColSize; i++)
+  for (uint8_t i = 0; i < BUTTON_COL_AMOUNT; i++)
     pinMode(PIN_BUTTON_ARRAY_COLS[i], INPUT_PULLUP);
 
-  FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, NUM_LEDS);
-  for (int i = 0; i < NUM_LEDS; i++) leds[i] = CRGB::Black;
+  FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, BUTTON_AMOUNT);
+  for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) leds[i] = CRGB::Black;
   FastLED.show();
 
   static HIDSubDescriptor node(_hidReportDescriptor, sizeof(_hidReportDescriptor));
@@ -126,7 +180,6 @@ void setup()
 
 void loop()
 {
-  buttonCurrentIndex = 0;
   outputButtons = 0;
   loadButtonArray();
   updateLEDs();
