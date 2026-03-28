@@ -49,7 +49,7 @@ const LedState LED_STATE_COLORS[] = {
 };
 
 const uint32_t TIME_EDIT_MODE = 3000;
-const uint32_t TIME_RESET_MODE = 5000;
+const uint32_t TIME_RESET_MODE = 6000;
 const uint8_t BUTTON_ROW_AMOUNT = sizeof(PIN_BUTTON_ARRAY_ROWS) / sizeof(PIN_BUTTON_ARRAY_ROWS[0]);
 const uint8_t BUTTON_COL_AMOUNT = sizeof(PIN_BUTTON_ARRAY_COLS) / sizeof(PIN_BUTTON_ARRAY_COLS[0]);
 const uint8_t BUTTON_AMOUNT = BUTTON_ROW_AMOUNT * BUTTON_COL_AMOUNT;
@@ -61,7 +61,7 @@ ButtonPreference preferences[BUTTON_AMOUNT];
 bool currentToggleState[BUTTON_AMOUNT];
 bool previousPhysicalState[BUTTON_AMOUNT];
 bool currentPhysicalState[BUTTON_AMOUNT];
-bool editMode = false;
+uint8_t editStage = 0;
 unsigned long editModeTimer = 0;
 uint32_t outputButtons = 0;
 bool releaseEdge[BUTTON_AMOUNT];
@@ -132,7 +132,7 @@ void loadButtonArray()
       bool physicalPressed = digitalRead(PIN_BUTTON_ARRAY_COLS[col]) == LOW;
 
       currentPhysicalState[index] = physicalPressed;
-      if (editMode) {
+      if (editStage > 0) {
         releaseEdge[index] = (!physicalPressed) && previousPhysicalState[index];
       } else {
         if (preferences[index].isToggle) {
@@ -154,11 +154,17 @@ void loadButtonArray()
 
   bool firstLastPressed = currentPhysicalState[0] && currentPhysicalState[BUTTON_AMOUNT - 1];
 
-  if (editMode) {
+  if (editStage == 1) {
     for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) {
       if (!releaseEdge[i]) continue;
       if (ignoreFirstLastRelease && (i == 0 || i == BUTTON_AMOUNT - 1)) continue;
       preferences[i].colorIndex = (preferences[i].colorIndex + 1) % LED_STATE_AMOUNT;
+    }
+  } else if (editStage == 2) {
+    for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) {
+      if (!releaseEdge[i]) continue;
+      if (ignoreFirstLastRelease && (i == 0 || i == BUTTON_AMOUNT - 1)) continue;
+      preferences[i].isToggle = !preferences[i].isToggle;
     }
   }
 
@@ -169,25 +175,26 @@ void loadButtonArray()
     } else {
       unsigned long held = (unsigned long)(millis() - editModeTimer);
       if (held >= TIME_RESET_MODE) {
-        // long hold: reset preferences to defaults and exit edit mode
         for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) {
           preferences[i].colorIndex = 0;
           preferences[i].isToggle = false;
         }
         savePreferencesToEEPROM();
-        editMode = false;
+        editStage = 0;
         editModeTimer = 0;
         outputButtons = 0;
         ignoreFirstLastRelease = true;
         for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) releaseEdge[i] = false;
       } else if (held >= TIME_EDIT_MODE && !holdToggled) {
-        // medium hold: toggle edit mode (only once per hold)
-        editMode = !editMode;
+        if (editStage == 0) editStage = 1;
+        else if (editStage == 1) editStage = 2;
+        else if (editStage == 2) {
+          editStage = 0;
+          savePreferencesToEEPROM();
+        }
         holdToggled = true;
-        // prepare to ignore first/last releases
         ignoreFirstLastRelease = true;
         for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) releaseEdge[i] = false;
-        if (!editMode) savePreferencesToEEPROM();
       }
     }
   } else {
@@ -206,8 +213,10 @@ void updateLEDs()
 {
   for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) {
     const LedState color = LED_STATE_COLORS[preferences[i].colorIndex];
-    if (editMode) {
+    if (editStage == 1) {
       leds[i] = color.pressed;
+    } else if (editStage == 2) {
+      leds[i] = preferences[i].isToggle ? color.pressed : CRGB::Black;
     } else {
       bool pressed = ((outputButtons >> i) & 0x1) != 0;
       leds[i] = pressed ? color.pressed : color.idle;
