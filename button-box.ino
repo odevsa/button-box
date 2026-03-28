@@ -1,5 +1,6 @@
 #include <HID.h>
 #include <FastLED.h>
+#include <EEPROM.h>
 
 
 // Uncomment to enable serial debug
@@ -47,6 +48,8 @@ const LedState LED_STATE_COLORS[] = {
   { idle: {0, 50, 50}, pressed: {0, 255, 255} }, // cyan
 };
 
+const uint32_t TIME_EDIT_MODE = 3000;
+const uint32_t TIME_RESET_MODE = 5000;
 const uint8_t BUTTON_ROW_AMOUNT = sizeof(PIN_BUTTON_ARRAY_ROWS) / sizeof(PIN_BUTTON_ARRAY_ROWS[0]);
 const uint8_t BUTTON_COL_AMOUNT = sizeof(PIN_BUTTON_ARRAY_COLS) / sizeof(PIN_BUTTON_ARRAY_COLS[0]);
 const uint8_t BUTTON_AMOUNT = BUTTON_ROW_AMOUNT * BUTTON_COL_AMOUNT;
@@ -57,7 +60,17 @@ CRGB leds[BUTTON_AMOUNT];
 ButtonPreference preferences[BUTTON_AMOUNT];
 bool currentToggleState[BUTTON_AMOUNT];
 bool previousPhysicalState[BUTTON_AMOUNT];
+bool currentPhysicalState[BUTTON_AMOUNT];
+bool editMode = false;
+unsigned long editModeTimer = 0;
 uint32_t outputButtons = 0;
+bool releaseEdge[BUTTON_AMOUNT];
+bool ignoreFirstLastRelease = false;
+bool holdToggled = false;
+
+const int EEPROM_MAGIC_ADDR = 0;
+const uint8_t EEPROM_MAGIC = 0xA5;
+const int EEPROM_PREFS_START = 1;
 
 // Joystick Report ID
 #define JOYSTICK_REPORT_ID 0x03
@@ -109,6 +122,8 @@ void setButton(uint8_t button, bool pressed)
 void loadButtonArray()
 {
   uint8_t index = 0;
+  for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) releaseEdge[i] = false;
+
   for (uint8_t row = 0; row < BUTTON_ROW_AMOUNT; row++)
   {
     digitalWrite(PIN_BUTTON_ARRAY_ROWS[row], LOW);
@@ -116,13 +131,18 @@ void loadButtonArray()
     for (uint8_t col = 0; col < BUTTON_COL_AMOUNT; col++) {
       bool physicalPressed = digitalRead(PIN_BUTTON_ARRAY_COLS[col]) == LOW;
 
-      if (preferences[index].isToggle) {
-        if (physicalPressed && !previousPhysicalState[index])
-          currentToggleState[index] = !currentToggleState[index];
-        
-        setButton(index, currentToggleState[index]);
+      currentPhysicalState[index] = physicalPressed;
+      if (editMode) {
+        releaseEdge[index] = (!physicalPressed) && previousPhysicalState[index];
       } else {
-        setButton(index, physicalPressed);
+        if (preferences[index].isToggle) {
+          if (physicalPressed && !previousPhysicalState[index])
+            currentToggleState[index] = !currentToggleState[index];
+          
+          setButton(index, currentToggleState[index]);
+        } else {
+          setButton(index, physicalPressed);
+        }
       }
 
       previousPhysicalState[index] = physicalPressed;
@@ -131,14 +151,67 @@ void loadButtonArray()
     
     digitalWrite(PIN_BUTTON_ARRAY_ROWS[row], HIGH);
   }
+
+  bool firstLastPressed = currentPhysicalState[0] && currentPhysicalState[BUTTON_AMOUNT - 1];
+
+  if (editMode) {
+    for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) {
+      if (!releaseEdge[i]) continue;
+      if (ignoreFirstLastRelease && (i == 0 || i == BUTTON_AMOUNT - 1)) continue;
+      preferences[i].colorIndex = (preferences[i].colorIndex + 1) % LED_STATE_AMOUNT;
+    }
+  }
+
+  if (firstLastPressed) {
+    if (editModeTimer == 0) {
+      editModeTimer = millis();
+      holdToggled = false;
+    } else {
+      unsigned long held = (unsigned long)(millis() - editModeTimer);
+      if (held >= TIME_RESET_MODE) {
+        // long hold: reset preferences to defaults and exit edit mode
+        for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) {
+          preferences[i].colorIndex = 0;
+          preferences[i].isToggle = false;
+        }
+        savePreferencesToEEPROM();
+        editMode = false;
+        editModeTimer = 0;
+        outputButtons = 0;
+        ignoreFirstLastRelease = true;
+        for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) releaseEdge[i] = false;
+      } else if (held >= TIME_EDIT_MODE && !holdToggled) {
+        // medium hold: toggle edit mode (only once per hold)
+        editMode = !editMode;
+        holdToggled = true;
+        // prepare to ignore first/last releases
+        ignoreFirstLastRelease = true;
+        for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) releaseEdge[i] = false;
+        if (!editMode) savePreferencesToEEPROM();
+      }
+    }
+  } else {
+    editModeTimer = 0;
+    holdToggled = false;
+  }
+
+  if (ignoreFirstLastRelease) {
+    if (!currentPhysicalState[0] && !currentPhysicalState[BUTTON_AMOUNT - 1]) {
+      ignoreFirstLastRelease = false;
+    }
+  }
 }
 
 void updateLEDs()
 {
   for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) {
     const LedState color = LED_STATE_COLORS[preferences[i].colorIndex];
-    bool pressed = ((outputButtons >> i) & 0x1) != 0;
-    leds[i] = pressed ? color.pressed : color.idle;
+    if (editMode) {
+      leds[i] = color.pressed;
+    } else {
+      bool pressed = ((outputButtons >> i) & 0x1) != 0;
+      leds[i] = pressed ? color.pressed : color.idle;
+    }
   }
   FastLED.show();
 }
@@ -156,6 +229,40 @@ void sendState()
   HID().SendReport(JOYSTICK_REPORT_ID, &joystickReport, sizeof(joystickReport));
 }
 
+void savePreferencesToEEPROM()
+{
+  EEPROM.update(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
+  for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) {
+    int addr = EEPROM_PREFS_START + i * 2;
+    EEPROM.update(addr, preferences[i].colorIndex);
+    EEPROM.update(addr + 1, preferences[i].isToggle ? 1 : 0);
+  }
+
+  #ifdef DEBUG
+  Serial.println("DEBUG: preferences saved to EEPROM");
+  #endif
+}
+
+void loadPreferencesFromEEPROM()
+{
+  if (EEPROM.read(EEPROM_MAGIC_ADDR) != EEPROM_MAGIC) {
+    #ifdef DEBUG
+    Serial.println("DEBUG: no preferences in EEPROM, using defaults");
+    #endif
+    return;
+  }
+
+  for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) {
+    int addr = EEPROM_PREFS_START + i * 2;
+    preferences[i].colorIndex = EEPROM.read(addr);
+    preferences[i].isToggle = (EEPROM.read(addr + 1) != 0);
+  }
+
+  #ifdef DEBUG
+  Serial.println("DEBUG: preferences loaded from EEPROM");
+  #endif
+}
+
 void setup()
 {
   #ifdef DEBUG
@@ -171,8 +278,9 @@ void setup()
     pinMode(PIN_BUTTON_ARRAY_COLS[i], INPUT_PULLUP);
 
   FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, BUTTON_AMOUNT);
+  loadPreferencesFromEEPROM();
   for (uint8_t i = 0; i < BUTTON_AMOUNT; i++) leds[i] = CRGB::Black;
-  FastLED.show();
+  updateLEDs();
 
   static HIDSubDescriptor node(_hidReportDescriptor, sizeof(_hidReportDescriptor));
   HID().AppendDescriptor(&node);
